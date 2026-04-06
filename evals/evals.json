@@ -1,0 +1,31 @@
+{
+  "skill_name": "multi-format-build",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm building a new skill for ADHD executive function support — it should help with task prioritization, time blindness compensation, and working memory scaffolding. I need it to work across Claude, OpenAI, n8n, and as an MCP server. Can you scaffold the full project with the build system?",
+      "expected_output": "A complete project scaffold: source/manifest.json with metadata wrapper and JSON Schema parameters, build.ts generating all 6 formats, package.json with per-format scripts, and source markdown stubs.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I have an existing dyscalculia-support-skill project. Its manifest uses the older flat format with CommandParameter arrays. I want to migrate it to the standardized manifest schema and regenerate the build.ts.",
+      "expected_output": "Migration of flat manifest to metadata-wrapper + JSON Schema parameters. New domain-agnostic build.ts. All 6 formats build.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I've got a tarot card reading interpretation skill. It has commands for single-card pulls, three-card spreads, Celtic Cross readings, and card-of-the-day. Generate the multi-format build system for it.",
+      "expected_output": "Complete build system for a non-educational domain. build.ts must be domain-agnostic. Manifest with metadata, skills, and commands with JSON Schema parameters.",
+      "files": []
+    }
+  ],
+  "results": {
+    "iteration_1": {
+      "eval_1_adhd": "10/10 — all assertions passed",
+      "eval_2_dyscalculia": "9/10 — domain term leaked into CLI section of build.ts",
+      "eval_3_tarot": "9/10 — domain term leaked into CLI section of build.ts",
+      "fix_applied": "Strengthened SKILL.md and build-template.md with explicit domain-agnostic guidance for CLI generator"
+    }
+  }
+}
