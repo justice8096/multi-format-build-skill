@@ -18,6 +18,18 @@
       "prompt": "I've got a tarot card reading interpretation skill. It has commands for single-card pulls, three-card spreads, Celtic Cross readings, and card-of-the-day. Generate the multi-format build system for it.",
       "expected_output": "Complete build system for a non-educational domain. build.ts must be domain-agnostic. Manifest with metadata, skills, and commands with JSON Schema parameters.",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "I have a dyslexia compliance audit skill that currently works in English for the US (IDEA/Section 504). I need to add Spanish and French locales — the Spanish version covers LOMLOE/ACNEAE and the French version covers French education law. Localize the full build so each locale generates all 6 output formats with translated content and display strings.",
+      "expected_output": "Manifest updated with defaultLocale: 'en' and locales: ['en', 'es', 'fr']. Locale override files created at source/locales/es.json and source/locales/fr.json with translated metadata, skill, and command display strings. Locale markdown subdirectories created (source/skills/es/, source/skills/fr/, source/commands/es/, source/commands/fr/) with stubs or translated content. build.ts is the standard locale-aware template (domain-agnostic, no hardcoded strings). package.json includes build:locale:es and build:locale:fr scripts. Build produces dist/en/, dist/es/, dist/fr/ directories each containing all 6 formats. Fallback works: missing locale files resolve to English default. --locale flag works for single-locale builds.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "I have an existing single-locale skill (no locales in the manifest). I want to add German and Japanese locales to it. Walk me through the migration without breaking the existing build.",
+      "expected_output": "Step-by-step migration: add defaultLocale and locales to metadata, create source/locales/ directory with de.json and ja.json override files, create locale subdirectories for skills and commands, add build:locale scripts. Backward compatibility preserved: existing default-locale content stays in place as the fallback. Build output changes from dist/<format>/ to dist/en/<format>/, dist/de/<format>/, dist/ja/<format>/.",
+      "files": []
     }
   ],
   "results": {
@@ -26,6 +38,14 @@
       "eval_2_dyscalculia": "9/10 — domain term leaked into CLI section of build.ts",
       "eval_3_tarot": "9/10 — domain term leaked into CLI section of build.ts",
       "fix_applied": "Strengthened SKILL.md and build-template.md with explicit domain-agnostic guidance for CLI generator"
+    },
+    "iteration_2": {
+      "eval_1_adhd": "10/10 — all assertions passed",
+      "eval_2_dyscalculia": "10/10 — all assertions passed",
+      "eval_3_tarot": "10/10 — all assertions passed",
+      "eval_4_i18n_compliance": "pending — new eval for multi-locale build",
+      "eval_5_locale_migration": "pending — new eval for adding locales to existing project",
+      "fix_applied": "Added locale support to manifest schema, build template, and SKILL.md"
     }
   }
 }

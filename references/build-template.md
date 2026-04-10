@@ -1,17 +1,32 @@
-# Build Template Reference
+﻿# Build Template Reference
 
-This is the canonical `build.ts` template. It is **fully manifest-driven** — there are NO placeholder
+This is the canonical `build.ts` template. It is **fully manifest-driven** â€” there are NO placeholder
 tokens to replace. Every project-specific value (name, slug, icon, descriptions) is read dynamically
 from `source/manifest.json` at build time.
 
 **CRITICAL: Domain-agnostic rule.** The generated build.ts must NEVER contain hardcoded domain
 strings. No project names, no domain keywords, no skill-specific terminology. Everything comes
-from the manifest. This applies to ALL format generators including the CLI generator — the CLI
+from the manifest. This applies to ALL format generators including the CLI generator â€” the CLI
 should construct display strings from `manifest.metadata.name` at runtime, not inline them as
 string literals in the build script.
 
 Copy this template verbatim and save as `build.ts` in the project root. Do not modify it to
 include project-specific strings.
+
+## Locale support
+
+The build template supports multi-language builds via `metadata.locales` in the manifest.
+
+**Backward compatibility**: When `metadata.locales` is absent, the build behaves exactly as the
+single-locale version â€” output goes to `dist/<format>/` as before. When `metadata.locales` is
+present, output is partitioned into `dist/<locale>/<format>/` directories.
+
+**Locale resolution**: Human-readable strings (names, descriptions) are merged from
+`source/locales/<locale>.json` override files. Markdown content is loaded from locale
+subdirectories (`source/skills/<locale>/<name>.md`) with fallback to the default file.
+
+**CLI flag**: `--locale <code>` builds a single locale. `--locale all` (default when locales
+are configured) builds all locales.
 
 ---
 
@@ -72,6 +87,8 @@ interface Metadata {
   license: string;
   repository?: string;
   keywords: string[];
+  defaultLocale?: string;
+  locales?: string[];
 }
 
 interface Manifest {
@@ -79,6 +96,17 @@ interface Manifest {
   skills: Skill[];
   commands: Command[];
   templates: Template[];
+}
+
+interface LocaleOverrides {
+  metadata?: Partial<Pick<Metadata, "name" | "description">>;
+  skills?: Record<string, { displayName?: string; description?: string }>;
+  commands?: Record<string, {
+    displayName?: string;
+    description?: string;
+    parameters?: Record<string, { description?: string }>;
+  }>;
+  templates?: Record<string, { displayName?: string; description?: string }>;
 }
 
 type FormatName = "claude-plugin" | "openai" | "n8n" | "prompts" | "mcp" | "cli";
@@ -89,6 +117,7 @@ type FormatName = "claude-plugin" | "openai" | "n8n" | "prompts" | "mcp" | "cli"
 
 interface CLIArgs {
   format: FormatName | "all";
+  locale: string;
   watch: boolean;
   clean: boolean;
   validateOnly: boolean;
@@ -96,11 +125,13 @@ interface CLIArgs {
 
 function parseArgs(): CLIArgs {
   const args = process.argv.slice(2);
-  const result: CLIArgs = { format: "all", watch: false, clean: false, validateOnly: false };
+  const result: CLIArgs = { format: "all", locale: "all", watch: false, clean: false, validateOnly: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--format" && args[i + 1]) { result.format = args[++i] as FormatName | "all"; }
     else if (arg.startsWith("--format=")) { result.format = arg.split("=")[1] as FormatName | "all"; }
+    else if (arg === "--locale" && args[i + 1]) { result.locale = args[++i]; }
+    else if (arg.startsWith("--locale=")) { result.locale = arg.split("=")[1]; }
     else if (arg === "--watch") { result.watch = true; }
     else if (arg === "--clean") { result.clean = true; }
     else if (arg === "--validate-only") { result.validateOnly = true; }
@@ -127,7 +158,7 @@ function stringifyYaml(obj: unknown, indent: number = 2): string {
       if (val.length === 0) return "[]";
       const items: string[] = [];
       for (const item of val) { items.push("- " + stringify(item, depth + 1)); }
-      return items.join("\n" + spaces);
+      return items.join("\n");
     }
     if (typeof val === "object") {
       const entries = Object.entries(val);
@@ -140,7 +171,7 @@ function stringifyYaml(obj: unknown, indent: number = 2): string {
           for (const line of nested.split("\n")) { items.push("  " + line); }
         } else { items.push(key + ": " + stringify(value, depth + 1)); }
       }
-      return items.join("\n" + spaces);
+      return items.join("\n");
     }
     return String(val);
   }
@@ -174,6 +205,98 @@ function toPascalCase(name: string): string {
 function toSnakeCase(name: string): string { return name.replace(/-/g, "_"); }
 
 // ============================================================================
+// LOCALE RESOLUTION
+// ============================================================================
+
+function isMultiLocale(manifest: Manifest): boolean {
+  return Array.isArray(manifest.metadata.locales) && manifest.metadata.locales.length > 0;
+}
+
+function getDefaultLocale(manifest: Manifest): string {
+  return manifest.metadata.defaultLocale || "en";
+}
+
+function getActiveLocales(manifest: Manifest, cliLocale: string): string[] {
+  if (!isMultiLocale(manifest)) return [getDefaultLocale(manifest)];
+  if (cliLocale === "all") return manifest.metadata.locales!;
+  if (manifest.metadata.locales!.includes(cliLocale)) return [cliLocale];
+  logError("Locale '" + cliLocale + "' not in manifest.metadata.locales: " + manifest.metadata.locales!.join(", "));
+  process.exit(1);
+}
+
+function loadLocaleOverrides(locale: string, defaultLocale: string): LocaleOverrides | null {
+  if (locale === defaultLocale) return null;
+  const overridePath = resolve(__dirname, "source/locales/" + locale + ".json");
+  if (!existsSync(overridePath)) {
+    console.warn("Warning: No locale override file for '" + locale + "' at " + overridePath);
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(overridePath, "utf-8")) as LocaleOverrides;
+  } catch (err) {
+    logError("Failed to parse locale file for '" + locale + "': " + (err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+}
+
+function resolveLocalizedManifest(manifest: Manifest, locale: string): Manifest {
+  const defaultLocale = getDefaultLocale(manifest);
+  const overrides = loadLocaleOverrides(locale, defaultLocale);
+  if (!overrides) return manifest;
+
+  // Deep clone to avoid mutating the original
+  const localized: Manifest = JSON.parse(JSON.stringify(manifest));
+
+  // Override metadata display strings
+  if (overrides.metadata) {
+    if (overrides.metadata.name) localized.metadata.name = overrides.metadata.name;
+    if (overrides.metadata.description) localized.metadata.description = overrides.metadata.description;
+  }
+
+  // Override skill display strings
+  if (overrides.skills) {
+    for (const skill of localized.skills) {
+      const so = overrides.skills[skill.name];
+      if (so) {
+        if (so.displayName) skill.displayName = so.displayName;
+        if (so.description) skill.description = so.description;
+      }
+    }
+  }
+
+  // Override command display strings and parameter descriptions
+  if (overrides.commands) {
+    for (const cmd of localized.commands) {
+      const co = overrides.commands[cmd.name];
+      if (co) {
+        if (co.displayName) cmd.displayName = co.displayName;
+        if (co.description) cmd.description = co.description;
+        if (co.parameters) {
+          for (const [pName, pOverride] of Object.entries(co.parameters)) {
+            if (cmd.parameters.properties[pName] && pOverride.description) {
+              cmd.parameters.properties[pName].description = pOverride.description;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Override template display strings
+  if (overrides.templates) {
+    for (const tmpl of localized.templates) {
+      const to = overrides.templates[tmpl.name];
+      if (to) {
+        if (to.displayName) tmpl.displayName = to.displayName;
+        if (to.description) tmpl.description = to.description;
+      }
+    }
+  }
+
+  return localized;
+}
+
+// ============================================================================
 // LOAD AND VALIDATE
 // ============================================================================
 
@@ -181,8 +304,7 @@ function loadManifest(): Manifest {
   log("Loading manifest.json...");
   const manifestPath = resolve(__dirname, "source/manifest.json");
   const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
-  if (!raw.metadata || !raw.metadata.name || !raw.metadata.version) {
-    throw new Error("Manifest missing required metadata fields (name, version)");
+  if (!raw.metadata || !raw.metadata.name || !raw.metadata.version || !raw.metadata.description || !raw.metadata.author || !raw.metadata.license || !Array.isArray(raw.metadata.keywords)) { throw new Error("Manifest missing required metadata fields (name, version, description, author, license, keywords)");
   }
   if (!Array.isArray(raw.commands) || raw.commands.length === 0) {
     throw new Error("Manifest must have at least one command");
@@ -194,51 +316,101 @@ function loadManifest(): Manifest {
       throw new Error(`Command "${cmd.name}" missing JSON Schema parameters`);
     }
   }
+
+  // Validate locale configuration
+  if (raw.metadata.locales && Array.isArray(raw.metadata.locales)) {
+    const defaultLocale = raw.metadata.defaultLocale || "en";
+    if (!raw.metadata.locales.includes(defaultLocale)) {
+      throw new Error("metadata.locales must include defaultLocale ('" + defaultLocale + "')");
+    }
+    for (const locale of raw.metadata.locales) {
+      if (!/^[a-z]{2}(-[A-Z]{2})?$/.test(locale)) {
+        throw new Error("Invalid locale code '" + locale + "' â€” expected BCP 47 format (e.g., 'en', 'es', 'pt-BR')");
+      }
+    }
+    log("Multi-locale mode: " + raw.metadata.locales.join(", ") + " (default: " + defaultLocale + ")");
+  }
+
   logSuccess("Manifest loaded (" + raw.commands.length + " commands, " + raw.skills.length + " skills)");
   return raw as Manifest;
 }
 
-function loadSkillMarkdown(skillName: string): string {
+// Locale-aware content loaders with fallback chain:
+//   source/skills/<locale>/<name>.md  â†’  source/skills/<name>.md
+
+function loadSkillMarkdown(skillName: string, locale?: string): string {
+  if (locale) {
+    const localizedPath = resolve(__dirname, "source/skills/" + locale + "/" + skillName + ".md");
+    if (existsSync(localizedPath)) return readMarkdown(localizedPath);
+  }
   return readMarkdown(resolve(__dirname, "source/skills/" + skillName + ".md"));
 }
-function loadCommandMarkdown(commandName: string): string {
+
+function loadCommandMarkdown(commandName: string, locale?: string): string {
+  if (locale) {
+    const localizedPath = resolve(__dirname, "source/commands/" + locale + "/" + commandName + ".md");
+    if (existsSync(localizedPath)) return readMarkdown(localizedPath);
+  }
   return readMarkdown(resolve(__dirname, "source/commands/" + commandName + ".md"));
+}
+
+function loadTemplateMarkdown(templateName: string, locale?: string): string {
+  if (locale) {
+    const localizedPath = resolve(__dirname, "source/templates/" + locale + "/" + templateName + ".md");
+    if (existsSync(localizedPath)) return readMarkdown(localizedPath);
+  }
+  return readMarkdown(resolve(__dirname, "source/templates/" + templateName + ".md"));
+}
+
+// ============================================================================
+// OUTPUT PATH HELPER
+// ============================================================================
+
+// In multi-locale mode: dist/<locale>/<format>/
+// In single-locale mode: dist/<format>/  (backward compatible)
+function distPath(format: string, multiLocale: boolean, locale?: string): string {
+  if (multiLocale && locale) {
+    return resolve(__dirname, "dist/" + locale + "/" + format);
+  }
+  return resolve(__dirname, "dist/" + format);
 }
 
 // ============================================================================
 // FORMAT 1: CLAUDE PLUGIN
 // ============================================================================
 
-function generateClaudePlugin(manifest: Manifest): void {
-  log("Generating Claude Code plugin...");
-  const base = resolve(__dirname, "dist/claude-plugin");
+function generateClaudePlugin(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating Claude Code plugin" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("claude-plugin", multiLocale, locale);
   ensureDir(base); ensureDir(resolve(base, "skills")); ensureDir(resolve(base, "commands"));
   const slug = toSlug(manifest.metadata.name);
   const plugin = {
     name: slug, version: manifest.metadata.version, description: manifest.metadata.description,
     author: manifest.metadata.author, license: manifest.metadata.license,
     keywords: manifest.metadata.keywords,
+    ...(locale ? { locale } : {}),
     skills: manifest.skills.map((s) => ({ name: s.name, description: s.description, path: "skills/" + s.name })),
     commands: manifest.commands.map((c) => ({ name: c.name, description: c.description, path: "commands/" + c.name + ".md" })),
   };
   writeFileSync(resolve(base, "plugin.json"), JSON.stringify(plugin, null, 2));
   for (const skill of manifest.skills) {
     ensureDir(resolve(base, "skills/" + skill.name));
-    writeFileSync(resolve(base, "skills/" + skill.name + "/SKILL.md"), loadSkillMarkdown(skill.name));
+    writeFileSync(resolve(base, "skills/" + skill.name + "/SKILL.md"), loadSkillMarkdown(skill.name, locale));
   }
   for (const cmd of manifest.commands) {
-    writeFileSync(resolve(base, "commands/" + cmd.name + ".md"), loadCommandMarkdown(cmd.name));
+    writeFileSync(resolve(base, "commands/" + cmd.name + ".md"), loadCommandMarkdown(cmd.name, locale));
   }
-  logSuccess("Claude plugin generated");
+  logSuccess("Claude plugin generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT 2: OPENAI FUNCTIONS
 // ============================================================================
 
-function generateOpenAIFunctions(manifest: Manifest): void {
-  log("Generating OpenAI function schemas...");
-  ensureDir(resolve(__dirname, "dist/openai"));
+function generateOpenAIFunctions(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating OpenAI function schemas" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("openai", multiLocale, locale);
+  ensureDir(base);
   const functions = manifest.commands.map((cmd) => {
     const properties: Record<string, unknown> = {};
     const required: string[] = cmd.parameters.required || [];
@@ -250,17 +422,18 @@ function generateOpenAIFunctions(manifest: Manifest): void {
     }
     return { type: "function", function: { name: toSnakeCase(cmd.name), description: cmd.description, parameters: { type: "object", properties, required } } };
   });
-  writeFileSync(resolve(__dirname, "dist/openai/functions.json"), JSON.stringify(functions, null, 2));
-  logSuccess("OpenAI functions generated");
+  writeFileSync(resolve(base, "functions.json"), JSON.stringify(functions, null, 2));
+  logSuccess("OpenAI functions generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT 3: N8N NODE
 // ============================================================================
 
-function generateN8nNode(manifest: Manifest): void {
-  log("Generating n8n node definition...");
-  ensureDir(resolve(__dirname, "dist/n8n"));
+function generateN8nNode(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating n8n node definition" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("n8n", multiLocale, locale);
+  ensureDir(base);
   const pascalName = toPascalCase(manifest.metadata.name);
   const slug = toSlug(manifest.metadata.name);
   const operations = manifest.commands.map((cmd) => ({ name: cmd.displayName, value: toSnakeCase(cmd.name), description: cmd.description }));
@@ -280,27 +453,30 @@ function generateN8nNode(manifest: Manifest): void {
     defaults: { name: manifest.metadata.name }, inputs: ["main"], outputs: ["main"],
     properties: [{ displayName: "Operation", name: "operation", type: "options", options: operations, default: operations[0]?.value || "" }, ...paramFields],
   };
-  writeFileSync(resolve(__dirname, "dist/n8n/" + pascalName + ".node.json"), JSON.stringify(node, null, 2));
-  logSuccess("n8n node definition generated");
+  writeFileSync(resolve(base, pascalName + ".node.json"), JSON.stringify(node, null, 2));
+  logSuccess("n8n node definition generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT 4: PROMPT LIBRARY
 // ============================================================================
 
-function generatePromptLibrary(manifest: Manifest): void {
-  log("Generating prompt library...");
-  ensureDir(resolve(__dirname, "dist/prompts"));
+function generatePromptLibrary(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating prompt library" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("prompts", multiLocale, locale);
+  ensureDir(base);
   const promptIndex = {
     name: manifest.metadata.name + " Prompts", version: manifest.metadata.version,
     description: manifest.metadata.description, author: manifest.metadata.author,
+    ...(locale ? { locale } : {}),
     prompts: manifest.commands.map((cmd) => ({ id: cmd.name, name: cmd.displayName, description: cmd.description, file: cmd.name + ".yaml" })),
   };
-  writeFileSync(resolve(__dirname, "dist/prompts/index.yaml"), stringifyYaml(promptIndex, 2));
+  writeFileSync(resolve(base, "index.yaml"), stringifyYaml(promptIndex, 2));
   const expertise = manifest.skills.map((s) => s.description);
   for (const cmd of manifest.commands) {
     const prompt = {
       name: cmd.displayName, id: cmd.name, description: cmd.description,
+      ...(locale ? { locale } : {}),
       models: ["gpt-4", "gpt-4-turbo", "claude-3-opus", "claude-3-sonnet", "claude-3.5-sonnet"],
       context: { role: "You are an expert assistant for " + manifest.metadata.name + ". " + manifest.metadata.description, expertise },
       parameters: Object.entries(cmd.parameters.properties).map(([name, def]) => ({
@@ -308,18 +484,18 @@ function generatePromptLibrary(manifest: Manifest): void {
       })),
       output: { format: "markdown", description: "Comprehensive " + cmd.displayName.toLowerCase() + " document" },
     };
-    writeFileSync(resolve(__dirname, "dist/prompts/" + cmd.name + ".yaml"), stringifyYaml(prompt, 2));
+    writeFileSync(resolve(base, cmd.name + ".yaml"), stringifyYaml(prompt, 2));
   }
-  logSuccess("Prompt library generated");
+  logSuccess("Prompt library generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT 5: MCP SERVER
 // ============================================================================
 
-function generateMcpServer(manifest: Manifest): void {
-  log("Generating MCP server...");
-  const base = resolve(__dirname, "dist/mcp-server");
+function generateMcpServer(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating MCP server" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("mcp-server", multiLocale, locale);
   ensureDir(resolve(base, "src/tools")); ensureDir(resolve(base, "src/knowledge"));
   ensureDir(resolve(base, "knowledge/skills")); ensureDir(resolve(base, "knowledge/commands"));
   const slug = toSlug(manifest.metadata.name);
@@ -402,21 +578,22 @@ function generateMcpServer(manifest: Manifest): void {
   writeFileSync(resolve(base, "tsconfig.json"), JSON.stringify(mcpTsconfig, null, 2));
 
   for (const skill of manifest.skills) {
-    writeFileSync(resolve(base, "knowledge/skills/" + skill.name + ".md"), loadSkillMarkdown(skill.name));
+    writeFileSync(resolve(base, "knowledge/skills/" + skill.name + ".md"), loadSkillMarkdown(skill.name, locale));
   }
   for (const cmd of manifest.commands) {
-    writeFileSync(resolve(base, "knowledge/commands/" + cmd.name + ".md"), loadCommandMarkdown(cmd.name));
+    writeFileSync(resolve(base, "knowledge/commands/" + cmd.name + ".md"), loadCommandMarkdown(cmd.name, locale));
   }
-  logSuccess("MCP server generated");
+  logSuccess("MCP server generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT 6: STANDALONE CLI
 // ============================================================================
 
-function generateCli(manifest: Manifest): void {
-  log("Generating standalone CLI...");
-  const base = resolve(__dirname, "dist/cli"); ensureDir(base);
+function generateCli(manifest: Manifest, multiLocale: boolean, locale?: string): void {
+  log("Generating standalone CLI" + (locale ? " [" + locale + "]" : "") + "...");
+  const base = distPath("cli", multiLocale, locale);
+  ensureDir(base);
   const commandHelp = manifest.commands.map((cmd) => '  "  ' + cmd.name + ' -- ' + cmd.description + '\\n" +').join("\n");
   const commandCases: string[] = [];
   for (const cmd of manifest.commands) {
@@ -431,7 +608,7 @@ function generateCli(manifest: Manifest): void {
       '        displayName: "' + cmd.displayName + '",', "        params: {", ...paramLines, "        },", "      };"].join("\n"));
   }
   const cliCode = ["#!/usr/bin/env tsx",
-    "// Auto-generated CLI — project name is read from manifest at build time",
+    "// Auto-generated CLI â€” project name is read from manifest at build time",
     "// Run: tsx cli.ts <command> [--param value ...]", "",
     'const VERSION = "' + manifest.metadata.version + '";',
     'const NAME = "' + manifest.metadata.name + '";', "",
@@ -456,14 +633,14 @@ function generateCli(manifest: Manifest): void {
     "const args = parseCliArgs();", "const result = routeCommand(command, args);",
     "console.log(JSON.stringify(result, null, 2));"].join("\n");
   writeFileSync(resolve(base, "cli.ts"), cliCode);
-  logSuccess("Standalone CLI generated");
+  logSuccess("Standalone CLI generated" + (locale ? " [" + locale + "]" : ""));
 }
 
 // ============================================================================
 // FORMAT REGISTRY
 // ============================================================================
 
-const FORMAT_GENERATORS: Record<FormatName, (manifest: Manifest) => void> = {
+const FORMAT_GENERATORS: Record<FormatName, (manifest: Manifest, multiLocale: boolean, locale?: string) => void> = {
   "claude-plugin": generateClaudePlugin, openai: generateOpenAIFunctions,
   n8n: generateN8nNode, prompts: generatePromptLibrary, mcp: generateMcpServer, cli: generateCli,
 };
@@ -486,20 +663,43 @@ async function main(): Promise<void> {
     log("Starting build..."); log("Output directory: " + resolve(__dirname, "dist"));
     const manifest = loadManifest();
     if (args.validateOnly) { logSuccess("Manifest is valid!"); return; }
-    if (args.format === "all") {
-      for (const [name, generator] of Object.entries(FORMAT_GENERATORS)) { generator(manifest); }
-    } else {
-      const generator = FORMAT_GENERATORS[args.format];
-      if (!generator) throw new Error("Unknown format: " + args.format);
-      generator(manifest);
+
+    const multiLocale = isMultiLocale(manifest);
+    const activeLocales = getActiveLocales(manifest, args.locale);
+
+    if (multiLocale) {
+      log("Building for " + activeLocales.length + " locale(s): " + activeLocales.join(", "));
     }
+
+    for (const locale of activeLocales) {
+      const localizedManifest = resolveLocalizedManifest(manifest, locale);
+
+      if (multiLocale) {
+        log(""); log("=== Locale: " + locale + " ===");
+      }
+
+      if (args.format === "all") {
+        for (const [, generator] of Object.entries(FORMAT_GENERATORS)) {
+          generator(localizedManifest, multiLocale, locale);
+        }
+      } else {
+        const generator = FORMAT_GENERATORS[args.format];
+        if (!generator) throw new Error("Unknown format: " + args.format);
+        generator(localizedManifest, multiLocale, locale);
+      }
+    }
+
     log(""); logSuccess("Build completed successfully!"); log("Generated artifacts:");
-    if (args.format === "all" || args.format === "claude-plugin") log("  - dist/claude-plugin/ (plugin.json + skills/ + commands/)");
-    if (args.format === "all" || args.format === "openai") log("  - dist/openai/functions.json");
-    if (args.format === "all" || args.format === "n8n") log("  - dist/n8n/*.node.json");
-    if (args.format === "all" || args.format === "prompts") log("  - dist/prompts/*.yaml");
-    if (args.format === "all" || args.format === "mcp") log("  - dist/mcp-server/ (full TypeScript MCP server)");
-    if (args.format === "all" || args.format === "cli") log("  - dist/cli/cli.ts (standalone CLI)");
+    for (const locale of activeLocales) {
+      const prefix = multiLocale ? "dist/" + locale + "/" : "dist/";
+      if (multiLocale) log("  [" + locale + "]");
+      if (args.format === "all" || args.format === "claude-plugin") log("  - " + prefix + "claude-plugin/ (plugin.json + skills/ + commands/)");
+      if (args.format === "all" || args.format === "openai") log("  - " + prefix + "openai/functions.json");
+      if (args.format === "all" || args.format === "n8n") log("  - " + prefix + "n8n/*.node.json");
+      if (args.format === "all" || args.format === "prompts") log("  - " + prefix + "prompts/*.yaml");
+      if (args.format === "all" || args.format === "mcp") log("  - " + prefix + "mcp-server/ (full TypeScript MCP server)");
+      if (args.format === "all" || args.format === "cli") log("  - " + prefix + "cli/cli.ts (standalone CLI)");
+    }
   } catch (error) {
     logError("Build failed!");
     if (error instanceof Error) console.error(error.message); else console.error(error);
