@@ -1,12 +1,12 @@
-# Build Template Reference
+﻿# Build Template Reference
 
-This is the canonical `build.ts` template. It is **fully manifest-driven** — there are NO placeholder
+This is the canonical `build.ts` template. It is **fully manifest-driven** â€” there are NO placeholder
 tokens to replace. Every project-specific value (name, slug, icon, descriptions) is read dynamically
 from `source/manifest.json` at build time.
 
 **CRITICAL: Domain-agnostic rule.** The generated build.ts must NEVER contain hardcoded domain
 strings. No project names, no domain keywords, no skill-specific terminology. Everything comes
-from the manifest. This applies to ALL format generators including the CLI generator — the CLI
+from the manifest. This applies to ALL format generators including the CLI generator â€” the CLI
 should construct display strings from `manifest.metadata.name` at runtime, not inline them as
 string literals in the build script.
 
@@ -127,7 +127,7 @@ function stringifyYaml(obj: unknown, indent: number = 2): string {
       if (val.length === 0) return "[]";
       const items: string[] = [];
       for (const item of val) { items.push("- " + stringify(item, depth + 1)); }
-      return items.join("\n" + spaces);
+      return items.join("\n");
     }
     if (typeof val === "object") {
       const entries = Object.entries(val);
@@ -140,7 +140,7 @@ function stringifyYaml(obj: unknown, indent: number = 2): string {
           for (const line of nested.split("\n")) { items.push("  " + line); }
         } else { items.push(key + ": " + stringify(value, depth + 1)); }
       }
-      return items.join("\n" + spaces);
+      return items.join("\n");
     }
     return String(val);
   }
@@ -181,8 +181,7 @@ function loadManifest(): Manifest {
   log("Loading manifest.json...");
   const manifestPath = resolve(__dirname, "source/manifest.json");
   const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
-  if (!raw.metadata || !raw.metadata.name || !raw.metadata.version) {
-    throw new Error("Manifest missing required metadata fields (name, version)");
+  if (!raw.metadata || !raw.metadata.name || !raw.metadata.version || !raw.metadata.description || !raw.metadata.author || !raw.metadata.license || !Array.isArray(raw.metadata.keywords)) { throw new Error("Manifest missing required metadata fields (name, version, description, author, license, keywords)");
   }
   if (!Array.isArray(raw.commands) || raw.commands.length === 0) {
     throw new Error("Manifest must have at least one command");
@@ -431,7 +430,7 @@ function generateCli(manifest: Manifest): void {
       '        displayName: "' + cmd.displayName + '",', "        params: {", ...paramLines, "        },", "      };"].join("\n"));
   }
   const cliCode = ["#!/usr/bin/env tsx",
-    "// Auto-generated CLI — project name is read from manifest at build time",
+    "// Auto-generated CLI â€” project name is read from manifest at build time",
     "// Run: tsx cli.ts <command> [--param value ...]", "",
     'const VERSION = "' + manifest.metadata.version + '";',
     'const NAME = "' + manifest.metadata.name + '";', "",
