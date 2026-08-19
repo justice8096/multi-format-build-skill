@@ -3,3 +3,8 @@ dist/
 *.js
 *.d.ts
 *.js.map
+
+# Graphify generated knowledge-graph outputs
+graph.html
+graph.json
+GRAPH_REPORT.md
